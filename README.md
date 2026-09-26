@@ -74,14 +74,13 @@ func NewUser(username, password string) *User {
 func (u *User) Save(conn *psql.Connection) error {
 
 	_, _, _, _, err := conn.ExecPrepared(`INSERT INTO 
-			users(id, username, password, firebase_tokens, objects) 
-				   VALUES ($1, $2, $3, $4, $5) 
+			users(id, username, password, firebase_tokens) 
+				   VALUES ($1, $2, $3, $4) 
 				   ON CONFLICT(id) DO UPDATE 
 				   SET 
 				   	username = $2, 
 					password = $3, 
-					firebase_tokens = $4,
-					objects = $5
+					firebase_tokens = $4
 					`,
 		u.ID, u.Username, u.Password, u.Tokens, u.Objects)
 	return err
