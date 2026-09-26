@@ -82,13 +82,13 @@ func (u *User) Save(conn *psql.Connection) error {
 					password = $3, 
 					firebase_tokens = $4
 					`,
-		u.ID, u.Username, u.Password, u.Tokens, u.Objects)
+		u.ID, u.Username, u.Password, u.Tokens)
 	return err
 }
 
 func (u User) String() string {
 
-	return fmt.Sprintf("User(id=\"%v\", username=\"%v\", password=\"%v\", tokens=%v, objects=%v)", u.ID, u.Username, u.Password, u.Tokens, u.Objects)
+	return fmt.Sprintf("User(id=\"%v\", username=\"%v\", password=\"%v\", tokens=%v)", u.ID, u.Username, u.Password, u.Tokens)
 }
 
 func main() {
