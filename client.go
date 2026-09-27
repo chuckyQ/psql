@@ -145,6 +145,34 @@ func (c *Client) QuerySingle(query string, out any, args ...any) error {
 	return setStringValue(dst, null[0], row[0])
 }
 
+func (c *Client) QueryRaw(query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+	return c.conn.ExecPrepared(query, args...)
+}
+
+func (c *Client) QuerySingleRaw(query string, args ...any) (nulls []bool, data []string, columns []string, types []string, err error) {
+
+	nulls_, data_, columns, types, err := c.conn.ExecPrepared(query, args...)
+	if err != nil {
+		return
+	}
+
+	if len(data_) == 0 {
+		return nil, nil, nil, nil, errors.New("zero results")
+	}
+
+	if len(data_) > 1 {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"expected single result, got %d results",
+			len(data),
+		)
+	}
+
+	row := data_[0]
+	null := nulls_[0]
+
+	return null, row, columns, types, err
+}
+
 func findFieldByTag(object reflect.Value, tagName string, tagValue string) (reflect.Value, bool) {
 	structType := object.Type()
 
