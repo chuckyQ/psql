@@ -875,10 +875,14 @@ func (c *Connection) ExecPrepared(query string, args ...any) (nullRows [][]bool,
 	// types from the SQL statement.
 	//
 
-	name := "query_" + hex.EncodeToString([]byte(query))
+	name, exists := c.preparedStmts[query]
 
-	if err := c.sendParse(name, query, len(args)); err != nil {
-		return nil, nil, nil, nil, err
+	if !exists {
+		name = "query_" + hex.EncodeToString([]byte(query))
+		if err := c.sendParse(name, query, len(args)); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		c.preparedStmts[query] = name
 	}
 
 	// ---------------------------------------------------------
