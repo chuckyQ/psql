@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Connection struct {
@@ -23,6 +24,55 @@ type Connection struct {
 	reader        *bufio.Reader
 	oid2typ       map[int]string
 	preparedStmts map[string]string
+}
+
+func (c *Connection) withContext(ctx context.Context, fn func() error) error {
+
+	if ctx == nil {
+		return errors.New("context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// A PostgreSQL connection is a blocking network connection. Set a socket
+	// deadline from the context so a blocked Read or Write can be interrupted.
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := c.conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	} else {
+		if err := c.conn.SetDeadline(time.Time{}); err != nil {
+			return err
+		}
+	}
+
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			// Context cancellation has no deadline, so force any blocked
+			// network operation to wake up.
+			_ = c.conn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	err := fn()
+	close(done)
+	<-watcherDone
+
+	// Do not leave a deadline behind for the next operation.
+	_ = c.conn.SetDeadline(time.Time{})
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+
+	return err
 }
 
 func (c *Connection) Close() {
@@ -45,12 +95,12 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 		preparedStmts: make(map[string]string),
 	}
 
-	err = c.startup(database, username, password)
+	err = c.startup(ctx, database, username, password)
 	if err != nil {
 		return nil, err
 	}
 
-	_, data, _, _, err := c.Query("SELECT oid, typname FROM pg_type;")
+	_, data, _, _, err := c.Query(ctx, "SELECT oid, typname FROM pg_type;")
 
 	if err != nil {
 		return nil, err
@@ -73,91 +123,94 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 
 // startup sends the PostgreSQL StartupMessage and handles
 // authentication until AuthenticationOk is received.
-func (c *Connection) startup(database string, username string, password string) error {
+func (c *Connection) startup(ctx context.Context, database string, username string, password string) error {
 
-	// StartupMessage:
-	//
-	// Int32 length
-	// Int32 protocol version
-	// "user"     + '\0'
-	// username   + '\0'
-	// "database" + '\0'
-	// database   + '\0'
-	// '\0'
-	//
-	// The length includes itself.
-	body := make([]byte, 0)
+	return c.withContext(ctx, func() error {
 
-	body = appendInt32(body, protocolVersion)
+		// StartupMessage:
+		//
+		// Int32 length
+		// Int32 protocol version
+		// "user"     + '\0'
+		// username   + '\0'
+		// "database" + '\0'
+		// database   + '\0'
+		// '\0'
+		//
+		// The length includes itself.
+		body := make([]byte, 0)
 
-	body = append(body, []byte("user")...)
-	body = append(body, 0)
-	body = append(body, []byte(username)...)
-	body = append(body, 0)
+		body = appendInt32(body, protocolVersion)
 
-	body = append(body, []byte("database")...)
-	body = append(body, 0)
-	body = append(body, []byte(database)...)
-	body = append(body, 0)
+		body = append(body, []byte("user")...)
+		body = append(body, 0)
+		body = append(body, []byte(username)...)
+		body = append(body, 0)
 
-	body = append(body, 0)
+		body = append(body, []byte("database")...)
+		body = append(body, 0)
+		body = append(body, []byte(database)...)
+		body = append(body, 0)
 
-	msg := make([]byte, 4)
-	binary.BigEndian.PutUint32(msg, uint32(len(body)+4))
-	msg = append(msg, body...)
+		body = append(body, 0)
 
-	if _, err := c.conn.Write(msg); err != nil {
-		return err
-	}
+		msg := make([]byte, 4)
+		binary.BigEndian.PutUint32(msg, uint32(len(body)+4))
+		msg = append(msg, body...)
 
-	// Authentication looc.
-	for {
-		msgType, payload, err := c.readMessage()
-		if err != nil {
+		if _, err := c.conn.Write(msg); err != nil {
 			return err
 		}
 
-		switch msgType {
-
-		case 'R':
-			// Authentication request.
-			if err := c.handleAuthentication(payload, username, password); err != nil {
+		// Authentication looc.
+		for {
+			msgType, payload, err := c.readMessage()
+			if err != nil {
 				return err
 			}
 
-			// handleAuthentication may have completed SCRAM
-			// or sent another authentication response.
+			switch msgType {
 
-		case 'S':
-			// ParameterStatus.
-			//
-			// Example:
-			//   server_version\0
-			//   16.4\0
-			//
-			// We don't need these parameters for this example.
+			case 'R':
+				// Authentication request.
+				if err := c.handleAuthentication(payload, username, password); err != nil {
+					return err
+				}
 
-		case 'K':
-			// BackendKeyData.
-			// Process ID + secret key.
-			// Useful for cancellation, but not needed here.
+				// handleAuthentication may have completed SCRAM
+				// or sent another authentication response.
 
-		case 'Z':
-			// ReadyForQuery.
-			//
-			// Startup/authentication is complete.
-			return nil
+			case 'S':
+				// ParameterStatus.
+				//
+				// Example:
+				//   server_version\0
+				//   16.4\0
+				//
+				// We don't need these parameters for this example.
 
-		case 'E':
-			return fmt.Errorf("postgres startup error: %s", parseError(payload))
+			case 'K':
+				// BackendKeyData.
+				// Process ID + secret key.
+				// Useful for cancellation, but not needed here.
 
-		case 'N':
-			// NoticeResponse. Ignore for this example.
+			case 'Z':
+				// ReadyForQuery.
+				//
+				// Startup/authentication is complete.
+				return nil
 
-		default:
-			// Other startup messages can be ignored here.
+			case 'E':
+				return fmt.Errorf("postgres startup error: %s", parseError(payload))
+
+			case 'N':
+				// NoticeResponse. Ignore for this example.
+
+			default:
+				// Other startup messages can be ignored here.
+			}
 		}
-	}
+	})
 }
 
 // handleAuthentication processes PostgreSQL Authentication messages.
@@ -280,7 +333,42 @@ func (c *Connection) readMessage() (byte, []byte, error) {
 	return msgType, payload, nil
 }
 
-func (c *Connection) Query(query string) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+// Query executes a SQL query using the PostgreSQL simple-query protocol.
+// The operation is canceled when ctx is canceled or its deadline expires.
+func (c *Connection) Query(ctx context.Context, query string) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+	err = c.withContext(ctx, func() error {
+		nulls, data, columns, types, err = c.query(query)
+		return err
+	})
+	return
+}
+
+// Exec executes a SQL statement. If args are supplied, PostgreSQL's
+// extended/prepared-query protocol is used.
+func (c *Connection) Exec(ctx context.Context, query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+	err = c.withContext(ctx, func() error {
+		if len(args) == 0 {
+			nulls, data, columns, types, err = c.query(query)
+			return err
+		}
+
+		nulls, data, columns, types, err = c.execPrepared(query, args...)
+		return err
+	})
+	return
+}
+
+// ExecPrepared executes a statement using PostgreSQL's extended-query protocol.
+// The operation is canceled when ctx is canceled or its deadline expires.
+func (c *Connection) ExecPrepared(ctx context.Context, query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+	err = c.withContext(ctx, func() error {
+		nulls, data, columns, types, err = c.execPrepared(query, args...)
+		return err
+	})
+	return
+}
+
+func (c *Connection) query(query string) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
 
 	err = c.sendQuery(query)
 	if err != nil {
@@ -292,13 +380,13 @@ func (c *Connection) Query(query string) (nulls [][]bool, data [][]string, colum
 
 }
 
-func (c *Connection) Exec(query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+func (c *Connection) exec(query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
 
 	if len(args) == 0 {
-		return c.Query(query)
+		return c.query(query)
 	}
 
-	return c.ExecPrepared(query, args...)
+	return c.execPrepared(query, args...)
 
 }
 
@@ -856,7 +944,7 @@ func bytesIndexZero(b []byte) int {
 	return -1
 }
 
-func (c *Connection) ExecPrepared(query string, args ...any) (nullRows [][]bool, dataRows [][]string, columns []string, types []string, err error) {
+func (c *Connection) execPrepared(query string, args ...any) (nullRows [][]bool, dataRows [][]string, columns []string, types []string, err error) {
 
 	// ---------------------------------------------------------
 	// Parse
