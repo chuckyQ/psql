@@ -35,7 +35,7 @@ func isStructSlice(rv reflect.Value) bool {
 	return rv.Type().Elem().Kind() == reflect.Struct
 }
 
-func (c *Client) Query(query string, out any, args ...any) error {
+func (c *Client) Query(ctx context.Context, query string, out any, args ...any) error {
 
 	if out == nil {
 		return errors.New("out cannot be nil")
@@ -49,7 +49,7 @@ func (c *Client) Query(query string, out any, args ...any) error {
 		)
 	}
 
-	nulls, data, columns, _, err := c.conn.ExecPrepared(query, args...)
+	nulls, data, columns, _, err := c.conn.ExecPrepared(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func (c *Client) Query(query string, out any, args ...any) error {
 	return nil
 }
 
-func (c *Client) QuerySingle(query string, out any, args ...any) error {
+func (c *Client) QuerySingle(ctx context.Context, query string, out any, args ...any) error {
 	if out == nil {
 		return errors.New("out cannot be nil")
 	}
@@ -109,7 +109,7 @@ func (c *Client) QuerySingle(query string, out any, args ...any) error {
 		dst = dst.Elem()
 	}
 
-	nulls, data, fields, _, err := c.conn.ExecPrepared(query, args...)
+	nulls, data, fields, _, err := c.conn.ExecPrepared(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -145,13 +145,13 @@ func (c *Client) QuerySingle(query string, out any, args ...any) error {
 	return setStringValue(dst, null[0], row[0])
 }
 
-func (c *Client) QueryRaw(query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
-	return c.conn.ExecPrepared(query, args...)
+func (c *Client) QueryRaw(ctx context.Context, query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
+	return c.conn.ExecPrepared(ctx, query, args...)
 }
 
-func (c *Client) QuerySingleRaw(query string, args ...any) (nulls []bool, data []string, columns []string, types []string, err error) {
+func (c *Client) QuerySingleRaw(ctx context.Context, query string, args ...any) (nulls []bool, data []string, columns []string, types []string, err error) {
 
-	nulls_, data_, columns, types, err := c.conn.ExecPrepared(query, args...)
+	nulls_, data_, columns, types, err := c.conn.ExecPrepared(ctx, query, args...)
 	if err != nil {
 		return
 	}
