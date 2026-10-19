@@ -99,10 +99,9 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 		return nil, err
 	}
 	c := &Connection{
-		conn:              conn,
-		reader:            bufio.NewReader(conn),
-		preparedStmts:     make(map[string]string),
-		lastUsedTimestamp: int(time.Now().Unix()),
+		conn:          conn,
+		reader:        bufio.NewReader(conn),
+		preparedStmts: make(map[string]string),
 	}
 
 	err = c.startup(ctx, database, username, password)
