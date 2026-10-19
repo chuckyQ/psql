@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sync/atomic"
 	"time"
 )
 
 type Client struct {
-	pool      *Pool
-	openConns atomic.Int32
-	config    *Config
+	pool   *Pool
+	config *Config
 }
 
 const tagName = "psql"
@@ -24,74 +22,87 @@ func (c *Client) Query(ctx context.Context, query string, out any, args ...any) 
 	}
 
 	rv := reflect.ValueOf(out)
-
-	if !isStructSlice(rv) {
-		return errors.New(
-			"out must be a non-nil pointer to a slice of structs",
-		)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return errors.New("out must be a non-nil pointer to a slice of structs")
 	}
 
-	nulls, data, columns, _, err := c.conn.ExecPrepared(ctx, query, args...)
+	dst := rv.Elem()
+	if dst.Kind() != reflect.Slice || dst.Type().Elem().Kind() != reflect.Struct {
+		return errors.New("out must be a non-nil pointer to a slice of structs")
+	}
+
+	id, conn, err := c.pool.getConn(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.pool.release(id, conn)
+
+	nulls, data, columns, _, err := conn.ExecPrepared(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 
-	dst := rv.Elem()
+	if len(nulls) != len(data) {
+		return fmt.Errorf("result has %d rows but %d null rows", len(data), len(nulls))
+	}
 
 	objects := reflect.MakeSlice(dst.Type(), len(data), len(data))
 
 	for i, row := range data {
-		object := objects.Index(i)
-
-		if len(row) != len(columns) {
-			return fmt.Errorf("row %d has %d values, expected %d", i, len(row), len(columns))
+		if len(row) != len(columns) || len(nulls[i]) != len(columns) {
+			return fmt.Errorf(
+				"row %d has %d values and %d null flags, expected %d columns",
+				i, len(row), len(nulls[i]), len(columns),
+			)
 		}
+
+		object := objects.Index(i)
 
 		for j, value := range row {
 			column := columns[j]
-			isNull := nulls[i][j]
-
 			field, ok := findFieldByTag(object, tagName, column)
-
 			if !ok {
-				// Ignore columns that don't have a matching
-				// struct field.
 				continue
 			}
 
-			if err := setStringValue(field, isNull, value); err != nil {
+			if err := setStringValue(field, nulls[i][j], value); err != nil {
 				return fmt.Errorf("row %d, column %q: %w", i, column, err)
 			}
 		}
 	}
 
 	dst.Set(objects)
-
 	return nil
 }
 
 func (c *Client) QuerySingle(ctx context.Context, query string, out any, args ...any) error {
+
 	if out == nil {
 		return errors.New("out cannot be nil")
 	}
 
 	rv := reflect.ValueOf(out)
-
-	if rv.IsNil() {
-		return errors.New("output cannot be nil")
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return errors.New("out must be a non-nil pointer")
 	}
 
-	// Unwrap pointers.
-	dst := rv
+	dst := rv.Elem()
+
+	// Allocate intermediate pointers where necessary.
 	for dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
 		}
-
 		dst = dst.Elem()
 	}
 
-	nulls, data, fields, _, err := c.conn.ExecPrepared(ctx, query, args...)
+	id, conn, err := c.pool.getConn(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.pool.release(id, conn)
+
+	nulls, data, columns, _, err := conn.ExecPrepared(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -99,28 +110,28 @@ func (c *Client) QuerySingle(ctx context.Context, query string, out any, args ..
 	if len(data) == 0 {
 		return errors.New("zero results")
 	}
-
 	if len(data) > 1 {
-		return fmt.Errorf(
-			"expected single result, got %d results",
-			len(data),
-		)
+		return fmt.Errorf("expected single result, got %d results", len(data))
+	}
+	if len(nulls) != len(data) {
+		return errors.New("result row/null metadata mismatch")
 	}
 
 	row := data[0]
 	null := nulls[0]
 
-	// Handle struct / pointer-to-struct.
-	if dst.Kind() == reflect.Struct {
-		return setStructValue(dst, fields, row, null)
+	if len(row) != len(columns) || len(null) != len(columns) {
+		return errors.New("result column metadata mismatch")
 	}
 
-	// Handle scalar / pointer-to-scalar.
+	if dst.Kind() == reflect.Struct {
+		return setStructValue(dst, columns, row, null)
+	}
+
 	if len(row) != 1 {
 		return fmt.Errorf(
 			"expected single column for %s, got %d",
-			dst.Type(),
-			len(row),
+			dst.Type(), len(row),
 		)
 	}
 
@@ -129,41 +140,42 @@ func (c *Client) QuerySingle(ctx context.Context, query string, out any, args ..
 
 func (c *Client) QueryRaw(ctx context.Context, query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
 
-	_, conn, err := c.pool.getConn(ctx)
+	id, conn, err := c.pool.getConn(ctx)
 	if err != nil {
-		return
+		return nil, nil, nil, nil, err
 	}
+	defer c.pool.release(id, conn)
 
 	return conn.ExecPrepared(ctx, query, args...)
 }
 
 func (c *Client) QuerySingleRaw(ctx context.Context, query string, args ...any) (nulls []bool, data []string, columns []string, types []string, err error) {
 
-	_, conn, err := c.pool.getConn(ctx)
+	id, conn, err := c.pool.getConn(ctx)
 	if err != nil {
-		return
+		return nil, nil, nil, nil, err
+	}
+	defer c.pool.release(id, conn)
+
+	nullRows, dataRows, columns, types, err := conn.ExecPrepared(ctx, query, args...)
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 
-	nulls_, data_, columns, types, err := conn.ExecPrepared(ctx, query, args...)
-	if err != nil {
-		return
-	}
-
-	if len(data_) == 0 {
+	if len(dataRows) == 0 {
 		return nil, nil, nil, nil, errors.New("zero results")
 	}
-
-	if len(data_) > 1 {
+	if len(dataRows) > 1 {
 		return nil, nil, nil, nil, fmt.Errorf(
 			"expected single result, got %d results",
-			len(data),
+			len(dataRows),
 		)
 	}
+	if len(nullRows) != len(dataRows) {
+		return nil, nil, nil, nil, errors.New("result row/null metadata mismatch")
+	}
 
-	row := data_[0]
-	null := nulls_[0]
-
-	return null, row, columns, types, err
+	return nullRows[0], dataRows[0], columns, types, nil
 }
 
 func NewClient(ctx context.Context, config Config) (*Client, error) {
