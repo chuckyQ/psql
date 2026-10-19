@@ -20,13 +20,14 @@ import (
 )
 
 type Connection struct {
-	conn              net.Conn
-	reader            *bufio.Reader
-	oid2typ           map[int]string
-	preparedStmts     map[string]string
-	lastUsedTimestamp int
-	mu                sync.Mutex
-	closed            bool
+	conn          net.Conn
+	reader        *bufio.Reader
+	oid2typ       map[int]string
+	preparedStmts map[string]string
+	connTimeout   time.Duration
+	mu            sync.Mutex
+	closed        bool
+	poolID        string
 }
 
 func (c *Connection) withContext(ctx context.Context, fn func() error) error {
@@ -66,7 +67,6 @@ func (c *Connection) withContext(ctx context.Context, fn func() error) error {
 		}
 	}()
 
-	c.markUsed()
 	err := fn()
 	close(done)
 	<-watcherDone
@@ -128,22 +128,6 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 	c.oid2typ = m
 
 	return c, nil
-
-}
-
-func (c *Connection) markUsed() {
-	c.lastUsedTimestamp = int(time.Now().Unix())
-}
-
-func (c *Connection) isHealthy(ctx context.Context, timeout int) bool {
-
-	now := int(time.Now().Unix())
-	if now-c.lastUsedTimestamp >= timeout {
-		return false
-	}
-
-	err := c.Ping(ctx)
-	return err == nil
 
 }
 
