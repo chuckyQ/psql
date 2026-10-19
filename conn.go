@@ -13,21 +13,26 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Connection struct {
-	conn          net.Conn
-	reader        *bufio.Reader
-	oid2typ       map[int]string
-	preparedStmts map[string]string
+	conn              net.Conn
+	reader            *bufio.Reader
+	oid2typ           map[int]string
+	preparedStmts     map[string]string
+	lastUsedTimestamp int
+	mu                sync.Mutex
+	closed            bool
 }
 
 func (c *Connection) withContext(ctx context.Context, fn func() error) error {
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if ctx == nil {
 		return errors.New("context cannot be nil")
 	}
@@ -61,6 +66,7 @@ func (c *Connection) withContext(ctx context.Context, fn func() error) error {
 		}
 	}()
 
+	c.markUsed()
 	err := fn()
 	close(done)
 	<-watcherDone
@@ -76,7 +82,10 @@ func (c *Connection) withContext(ctx context.Context, fn func() error) error {
 }
 
 func (c *Connection) Close() {
-	if c.conn != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil && !c.closed {
+		c.closed = true
 		c.conn.Close()
 	}
 }
@@ -90,9 +99,10 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 		return nil, err
 	}
 	c := &Connection{
-		conn:          conn,
-		reader:        bufio.NewReader(conn),
-		preparedStmts: make(map[string]string),
+		conn:              conn,
+		reader:            bufio.NewReader(conn),
+		preparedStmts:     make(map[string]string),
+		lastUsedTimestamp: int(time.Now().Unix()),
 	}
 
 	err = c.startup(ctx, database, username, password)
@@ -119,6 +129,27 @@ func Connect(ctx context.Context, host string, port int, database, username, pas
 
 	return c, nil
 
+}
+
+func (c *Connection) markUsed() {
+	c.lastUsedTimestamp = int(time.Now().Unix())
+}
+
+func (c *Connection) isHealthy(ctx context.Context, timeout int) bool {
+
+	now := int(time.Now().Unix())
+	if now-c.lastUsedTimestamp >= timeout {
+		return false
+	}
+
+	err := c.Ping(ctx)
+	return err == nil
+
+}
+
+func (c *Connection) Ping(ctx context.Context) error {
+	_, _, _, _, err := c.Query(ctx, "-- ping")
+	return err
 }
 
 // startup sends the PostgreSQL StartupMessage and handles
@@ -377,16 +408,6 @@ func (c *Connection) query(query string) (nulls [][]bool, data [][]string, colum
 
 	nulls, data, columns, types, err = c.readResults()
 	return nulls, data, columns, types, err
-
-}
-
-func (c *Connection) exec(query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
-
-	if len(args) == 0 {
-		return c.query(query)
-	}
-
-	return c.execPrepared(query, args...)
 
 }
 
@@ -1217,120 +1238,4 @@ func (c *Connection) sendBind(statementName string, args []any) error {
 	payload = appendInt16(payload, 0)
 
 	return c.sendMessage('B', payload)
-}
-
-func parameterString(value any) (string, error) {
-
-	if value == nil {
-		return "", nil
-	}
-
-	rv := reflect.ValueOf(value)
-
-	// Dereference pointers.
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return "", nil
-		}
-
-		rv = rv.Elem()
-	}
-
-	// Handle slices and arrays.
-	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
-		var b strings.Builder
-
-		b.WriteByte('{')
-
-		for i := 0; i < rv.Len(); i++ {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-
-			element := rv.Index(i)
-
-			// Handle interface{} elements.
-			if element.Kind() == reflect.Interface {
-				if element.IsNil() {
-					b.WriteString("NULL")
-					continue
-				}
-
-				element = element.Elem()
-			}
-
-			s, err := parameterString(element.Interface())
-			if err != nil {
-				return "", err
-			}
-
-			b.WriteString(s)
-		}
-
-		b.WriteByte('}')
-
-		return b.String(), nil
-	}
-
-	value = rv.Interface()
-
-	switch v := value.(type) {
-
-	case string:
-		return v, nil
-
-	case []byte:
-		return string(v), nil
-
-	case bool:
-		if v {
-			return "true", nil
-		}
-		return "false", nil
-
-	case int:
-		return strconv.Itoa(v), nil
-
-	case int8:
-		return strconv.FormatInt(int64(v), 10), nil
-
-	case int16:
-		return strconv.FormatInt(int64(v), 10), nil
-
-	case int32:
-		return strconv.FormatInt(int64(v), 10), nil
-
-	case int64:
-		return strconv.FormatInt(v, 10), nil
-
-	case uint:
-		return strconv.FormatUint(uint64(v), 10), nil
-
-	case uint8:
-		return strconv.FormatUint(uint64(v), 10), nil
-
-	case uint16:
-		return strconv.FormatUint(uint64(v), 10), nil
-
-	case uint32:
-		return strconv.FormatUint(uint64(v), 10), nil
-
-	case uint64:
-		return strconv.FormatUint(v, 10), nil
-
-	case float32:
-		return strconv.FormatFloat(float64(v), 'g', -1, 32), nil
-
-	case float64:
-		return strconv.FormatFloat(v, 'g', -1, 64), nil
-
-	case fmt.Stringer:
-		return v.String(), nil
-
-	default:
-		return "", fmt.Errorf(
-			"unsupported PostgreSQL parameter type %T",
-			value,
-		)
-	}
 }
