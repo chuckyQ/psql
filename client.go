@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type Client struct {
-	conn *Connection
+	pool      *Pool
+	openConns atomic.Int32
+	config    *Config
 }
 
 const tagName = "psql"
@@ -426,70 +428,109 @@ func setSliceValue(field reflect.Value, value string) error {
 	return nil
 }
 
-func parsePostgresArray(value string) ([]string, error) {
-	var result []string
-	var current strings.Builder
+func NewClient(ctx context.Context, config Config) (*Client, error) {
 
-	inQuotes := false
-	escaped := false
-
-	for _, r := range value {
-
-		if escaped {
-			current.WriteRune(r)
-			escaped = false
-			continue
-		}
-
-		if r == '\\' && inQuotes {
-			escaped = true
-			continue
-		}
-
-		switch r {
-		case '"':
-			inQuotes = !inQuotes
-
-		case ',':
-			if !inQuotes {
-				result = append(
-					result,
-					current.String(),
-				)
-				current.Reset()
-				continue
-			}
-
-			current.WriteRune(r)
-
-		default:
-			current.WriteRune(r)
-		}
+	defaultConfig := Config{
+		Host:            "localhost",
+		Port:            5432,
+		User:            "postgres",
+		Password:        "",
+		Database:        "postgres",
+		SSLMode:         "",
+		SSLCert:         "",
+		SSLKey:          "",
+		SSLRootCert:     "",
+		ApplicationName: "",
+		Options:         make(map[string]string),
+		DSN:             "",
+		MinConns:        1,
+		MaxConns:        3,
+		IdleConnTimeout: time.Duration(30 * time.Second),
+		MaxIdleConns:    1,
+		ConnTimeout:     time.Duration(30 * time.Second),
+		MinIdleConns:    1,
 	}
 
-	if inQuotes {
-		return nil, fmt.Errorf(
-			"unterminated quoted array element",
-		)
+	if config.Host != "" {
+		defaultConfig.Host = config.Host
 	}
 
-	result = append(
-		result,
-		current.String(),
-	)
+	if config.Port > 0 {
+		defaultConfig.Port = config.Port
+	}
 
-	return result, nil
-}
+	if config.User != "" {
+		defaultConfig.User = "postgres"
+	}
 
-func NewClient(ctx context.Context, host string, port int, database, username, password string) (*Client, error) {
+	if config.Password != "" {
+		defaultConfig.Password = "postgres"
+	}
 
-	conn, err := Connect(ctx, host, port, database, username, password)
-	if err != nil {
-		return nil, err
+	if config.Database != "" {
+		defaultConfig.Database = "postgres"
+	}
+
+	if config.SSLMode != "" {
+		defaultConfig.SSLMode = config.SSLMode
+	}
+	if config.SSLCert != "" {
+		defaultConfig.SSLCert = config.SSLCert
+	}
+	if config.SSLKey != "" {
+		defaultConfig.SSLKey = config.SSLKey
+	}
+	if config.SSLRootCert != "" {
+		defaultConfig.SSLRootCert = config.SSLRootCert
+	}
+	if config.ConnTimeout > 0 {
+		defaultConfig.ConnTimeout = config.ConnTimeout
+	}
+	if config.ApplicationName != "" {
+		defaultConfig.ApplicationName = config.ApplicationName
+	}
+	if config.Options != nil {
+		defaultConfig.Options = config.Options
+	}
+	if config.DSN != "" {
+		c, err := parsePostgresDSN(config.DSN)
+		if err != nil {
+			return nil, err
+		}
+		defaultConfig = *c
+	}
+
+	if config.MaxConns > 0 {
+		defaultConfig.MaxConns = config.MaxConns
+	}
+
+	if config.MinConns > 0 {
+		defaultConfig.MinConns = config.MinConns
+	}
+
+	if config.MaxConns < config.MinConns {
+		return nil, errors.New("max connections cannot be < min connections")
+	}
+
+	if config.MaxIdleConns > 0 {
+		defaultConfig.MaxIdleConns = config.MaxIdleConns
+	}
+
+	if config.IdleConnTimeout > 0 {
+		defaultConfig.IdleConnTimeout = config.IdleConnTimeout
+	}
+
+	if config.ConnTimeout > 0 {
+		defaultConfig.ConnTimeout = config.ConnTimeout
+	}
+
+	if config.MinIdleConns > config.MaxIdleConns {
+		return nil, errors.New("min idle connections cannot be > max idle connections")
 	}
 
 	c := &Client{
-		conn: conn,
+		pool:   newPool(&config),
+		config: &defaultConfig,
 	}
 
 	return c, nil
