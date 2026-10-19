@@ -91,7 +91,7 @@ func parsePostgresDSN(dsn string) (*Config, error) {
 					"invalid connect_timeout %q", value,
 				)
 			}
-			cfg.ConnectTimeout = timeout
+			cfg.ConnTimeout = time.Duration(timeout * int(time.Second))
 		case "application_name":
 			cfg.ApplicationName = value
 		default:
