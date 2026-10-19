@@ -9,6 +9,24 @@ import (
 	"time"
 )
 
+func isStructSlice(rv reflect.Value) bool {
+	if !rv.IsValid() {
+		return false
+	}
+
+	if rv.IsNil() {
+		return false
+	}
+
+	rv = rv.Elem()
+
+	if rv.Kind() != reflect.Slice {
+		return false
+	}
+
+	return rv.Type().Elem().Kind() == reflect.Struct
+}
+
 func parameterString(value any) (string, error) {
 
 	if value == nil {

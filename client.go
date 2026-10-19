@@ -17,24 +17,6 @@ type Client struct {
 
 const tagName = "psql"
 
-func isStructSlice(rv reflect.Value) bool {
-	if !rv.IsValid() {
-		return false
-	}
-
-	if rv.IsNil() {
-		return false
-	}
-
-	rv = rv.Elem()
-
-	if rv.Kind() != reflect.Slice {
-		return false
-	}
-
-	return rv.Type().Elem().Kind() == reflect.Struct
-}
-
 func (c *Client) Query(ctx context.Context, query string, out any, args ...any) error {
 
 	if out == nil {
