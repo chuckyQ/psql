@@ -95,36 +95,6 @@ func (p *Pool) getConn(ctx context.Context) (string, *Connection, error) {
 
 }
 
-func (p *Pool) Query(ctx context.Context, query string,
-	out any, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
-
-	uu, c, err := p.getConn(ctx)
-
-	if err != nil {
-		p.release(uu, c)
-		return
-	}
-
-	nulls, data, columns, types, err = c.Query(ctx, query)
-	return
-}
-
-func (p *Pool) Exec(ctx context.Context, query string, args ...any) (nulls [][]bool, data [][]string, columns []string, types []string, err error) {
-
-	uu, conn, err := p.getConn(ctx)
-	if err != nil {
-		p.release(uu, conn)
-		return
-	}
-	nulls, data, columns, types, err = conn.Exec(ctx, query, args...)
-	return
-
-}
-
-func (p *Pool) monitor(ctx context.Context) {
-
-}
-
 func newPool(config *Config) *Pool {
 
 	return &Pool{
