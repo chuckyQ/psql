@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"uuid"
 )
 
 func isStructSlice(rv reflect.Value) bool {
@@ -42,6 +43,10 @@ func parameterString(value any) (string, error) {
 		}
 
 		rv = rv.Elem()
+	}
+
+	if v, ok := value.(uuid.UUID); ok {
+		return v.String(), nil
 	}
 
 	// Handle slices and arrays.
@@ -385,6 +390,15 @@ func setStringValue(field reflect.Value, null bool, value string) error {
 			field.Set(reflect.ValueOf(t))
 			return nil
 		}
+	case reflect.TypeOf(uuid.UUID{}).Kind():
+
+		if unmarshaler, ok := field.Addr().Interface().(encoding.TextUnmarshaler); ok {
+			if err := unmarshaler.UnmarshalText([]byte(value)); err != nil {
+				return fmt.Errorf("failed to unmarshal %s from %q: %w", field.Type(), value, err)
+			}
+			return nil
+		}
+
 	}
 
 	return fmt.Errorf("unsupported destination type %s", field.Type())
