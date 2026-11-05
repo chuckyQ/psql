@@ -662,8 +662,10 @@ func (c *Connection) readResults() (nullRows [][]bool, dataRows [][]string, colu
 			}
 
 		case 'D':
-			// DataRow.
-			nr, dr := parseDataRow(payload)
+			nr, dr, err := parseDataRow(payload)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
 			dataRows = append(dataRows, dr)
 			nullRows = append(nullRows, nr)
 
@@ -780,10 +782,9 @@ func parseRowDescription(payload []byte) ([]*tableRowDescription, error) {
 }
 
 // parseDataRow parses a DataRow message.
-func parseDataRow(payload []byte) ([]bool, []string) {
-
+func parseDataRow(payload []byte) ([]bool, []string, error) {
 	if len(payload) < 2 {
-		return []bool{}, []string{}
+		return nil, nil, errors.New("invalid DataRow")
 	}
 
 	count := int(binary.BigEndian.Uint16(payload[:2]))
@@ -795,7 +796,7 @@ func parseDataRow(payload []byte) ([]bool, []string) {
 	for i := 0; i < count; i++ {
 
 		if pos+4 > len(payload) {
-			break
+			return nil, nil, fmt.Errorf("DataRow ended before column %d length", i)
 		}
 
 		length := int32(binary.BigEndian.Uint32(payload[pos : pos+4]))
@@ -807,20 +808,35 @@ func parseDataRow(payload []byte) ([]bool, []string) {
 			continue
 		}
 
-		nullData = append(nullData, false)
+		if length < 0 {
+			return nil, nil, fmt.Errorf(
+				"invalid DataRow length %d for column %d",
+				length, i,
+			)
+		}
 
-		if pos+int(length) > len(payload) {
-			break
+		if int64(pos)+int64(length) > int64(len(payload)) {
+			return nil, nil, fmt.Errorf(
+				"DataRow column %d exceeds message boundary",
+				i,
+			)
 		}
 
 		value := string(payload[pos : pos+int(length)])
-		rowData = append(rowData, value)
 		pos += int(length)
 
+		nullData = append(nullData, false)
+		rowData = append(rowData, value)
 	}
 
-	return nullData, rowData
+	if pos != len(payload) {
+		return nil, nil, fmt.Errorf(
+			"DataRow has %d unexpected trailing bytes",
+			len(payload)-pos,
+		)
+	}
 
+	return nullData, rowData, nil
 }
 
 // parseError extracts PostgreSQL ErrorResponse/NoticeResponse fields.
@@ -1085,7 +1101,18 @@ func (c *Connection) readExecResults() (nullRows [][]bool, dataRows [][]string, 
 		case 'D':
 			// DataRow.
 
-			nullRow, dataRow := parseDataRow(payload)
+			nullRow, dataRow, err := parseDataRow(payload)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+
+			if len(dataRow) != len(columns) {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"DataRow contains %d columns, RowDescription contains %d",
+					len(dataRow),
+					len(columns),
+				)
+			}
 
 			nullRows = append(nullRows, nullRow)
 			dataRows = append(dataRows, dataRow)
