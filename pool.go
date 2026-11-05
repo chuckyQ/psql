@@ -3,11 +3,10 @@ package psql
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
-	"uuid"
+	"github.com/google/uuid"
 )
 
 var (
@@ -40,15 +39,14 @@ func (p *Pool) signalLocked() {
 }
 
 func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan struct{}, error) {
-
 	if err := ctx.Err(); err != nil {
 		return "", nil, false, nil, err
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.closed {
+		p.mu.Unlock()
 		return "", nil, false, nil, ErrPoolClosed
 	}
 
@@ -57,12 +55,17 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		delete(p.openConns, id)
 		p.busyConns[id] = conn
 		p.signalLocked()
+		p.mu.Unlock()
 		return id, conn, true, nil, nil
 	}
 
-	// Reserve capacity before opening a new connection.
-	if uint64(p.totalConns) < uint64(p.config.MaxConns) {
+	p.mu.Lock()
+	// Reserve capacity atomically before connecting.
+	if p.totalConns < int(p.config.MaxConns) {
 		p.totalConns++
+		p.mu.Unlock()
+		// Do not lock around this because connecting
+		// can be slow and bottleneck the system.
 		conn, err := Connect(
 			ctx,
 			p.config.Host,
@@ -73,45 +76,53 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		)
 
 		if err != nil {
+			p.mu.Lock()
 			p.totalConns--
 			p.signalLocked()
+			p.mu.Unlock()
+
 			return "", nil, false, nil, err
 		}
 
 		id := uuid.New().String()
 		conn.poolID = id
 		conn.connTimeout = p.config.ConnTimeout
-		// The pool might have been closed while Connect was running.
+		p.mu.Lock()
+
+		// Close may have been called while Connect was running.
 		if p.closed {
 			p.totalConns--
 			p.signalLocked()
+			p.mu.Unlock()
 			conn.Close()
 			return "", nil, false, nil, ErrPoolClosed
 		}
 
 		p.busyConns[id] = conn
 		p.signalLocked()
+		p.mu.Unlock()
 		return id, conn, true, nil, nil
 	}
 
+	// Capture the current notification channel while holding the lock.
+	// A subsequent state change closes this channel and wakes the waiter.
 	wait := p.notify
+	p.mu.Unlock()
+
 	return "", nil, false, wait, nil
 }
 
-func (p *Pool) getConn(ctx context.Context) (string, *Connection, error) {
+func (p *Pool) getConn(
+	ctx context.Context,
+) (string, *Connection, error) {
 	if ctx == nil {
 		return "", nil, errors.New("psql: nil context")
 	}
 
-	if p.config == nil {
+	if p.config == nil ||
+		p.config.MaxConns <= 0 ||
+		p.config.MaxIdleConns < 0 {
 		return "", nil, ErrInvalidPoolConfig
-	}
-
-	if p.config.MaxConns == 0 {
-		return "", nil, fmt.Errorf(
-			"%w: MaxConns must be greater than zero",
-			ErrInvalidPoolConfig,
-		)
 	}
 
 	for {
@@ -124,8 +135,6 @@ func (p *Pool) getConn(ctx context.Context) (string, *Connection, error) {
 			return id, conn, nil
 		}
 
-		// QueryWaitTime remains an optional retry interval. The notification
-		// channel wakes the caller immediately when pool state changes.
 		if p.config.QueryWaitTime <= 0 {
 			select {
 			case <-ctx.Done():
@@ -160,26 +169,27 @@ func (p *Pool) getConn(ctx context.Context) (string, *Connection, error) {
 	}
 }
 
+// release returns a connection to the idle pool or closes it.
+// Connection closing occurs outside the pool lock.
 func (p *Pool) release(id string, conn *Connection) {
-
 	if id == "" || conn == nil {
 		return
 	}
 
-	var closeConn *Connection
-
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	registered, exists := p.busyConns[id]
 	if !exists || registered != conn {
+		p.mu.Unlock()
 		return
 	}
 
 	delete(p.busyConns, id)
 
+	var closeConn *Connection
+
 	if p.closed ||
-		uint64(len(p.openConns)) >= uint64(p.config.MaxIdleConns) {
+		len(p.openConns) >= int(p.config.MaxIdleConns) {
 		p.totalConns--
 		closeConn = conn
 	} else {
@@ -187,17 +197,20 @@ func (p *Pool) release(id string, conn *Connection) {
 	}
 
 	p.signalLocked()
+	p.mu.Unlock()
+
 	if closeConn != nil {
 		closeConn.Close()
 	}
 }
 
-// Close prevents new acquisitions and closes all idle connections.
+// Close prevents new acquisitions and closes idle connections.
 // Busy connections are closed when their callers release them.
+// Connections being established are closed when Connect returns.
 func (p *Pool) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		return nil
 	}
 
@@ -211,9 +224,12 @@ func (p *Pool) Close() error {
 	}
 
 	p.signalLocked()
+	p.mu.Unlock()
+
 	for _, conn := range idle {
 		conn.Close()
 	}
 
 	return nil
+
 }
