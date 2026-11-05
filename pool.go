@@ -58,7 +58,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		return id, conn, true, nil, nil
 	}
 
-	p.mu.Lock()
 	// Reserve capacity atomically before connecting.
 	if p.totalConns < int(p.config.MaxConns) {
 		p.totalConns++
@@ -74,7 +73,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		)
 
 		if err != nil {
-			p.mu.Lock()
 			p.totalConns--
 			p.signalLocked()
 
@@ -84,7 +82,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		id := uuid.New().String()
 		conn.poolID = id
 		conn.connTimeout = p.config.ConnTimeout
-		p.mu.Lock()
 
 		// Close may have been called while Connect was running.
 		if p.closed {
