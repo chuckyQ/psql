@@ -982,21 +982,14 @@ func (c *Connection) execPrepared(query string, args ...any) (nullRows [][]bool,
 	// Using zero OIDs tells PostgreSQL to infer the parameter
 	// types from the SQL statement.
 	//
-
-	name, exists := c.preparedStmts[query]
-
-	if !exists {
-		name = "query_" + hex.EncodeToString([]byte(query))
-		if err := c.sendParse(name, query, len(args)); err != nil {
-			return nil, nil, nil, nil, err
-		}
-		c.preparedStmts[query] = name
+	if err := c.sendParse("", query, len(args)); err != nil {
+		return nil, nil, nil, nil, err
 	}
 
 	// ---------------------------------------------------------
 	// Bind
 	// ---------------------------------------------------------
-	if err := c.sendBind(name, args); err != nil {
+	if err := c.sendBind("", args); err != nil {
 		return nil, nil, nil, nil, err
 	}
 
@@ -1026,6 +1019,7 @@ func (c *Connection) execPrepared(query string, args ...any) (nullRows [][]bool,
 	// ---------------------------------------------------------
 	// Read responses
 	// ---------------------------------------------------------
+
 	return c.readExecResults()
 }
 
@@ -1058,35 +1052,30 @@ func (c *Connection) sendDescribePortal() error {
 }
 
 func (c *Connection) readExecResults() (nullRows [][]bool, dataRows [][]string, columns []string, types []string, err error) {
-	for {
-		msgType, payload, err := c.readMessage()
 
-		if err != nil {
-			return nullRows, dataRows, columns, types, err
+	var queryErr error
+
+	for {
+		msgType, payload, readErr := c.readMessage()
+		if readErr != nil {
+			return nullRows, dataRows, columns, types, readErr
 		}
 
 		switch msgType {
-
-		case '1':
-			// ParseComplete.
-
-		case '2':
-			// BindComplete.
+		case '1', '2':
+			// ParseComplete, BindComplete.
 
 		case 'T':
-			// RowDescription.
-
-			tableHeaderDescriptors, err := parseRowDescription(payload)
-			if err != nil {
-				return nil, nil, nil, nil, err
+			descriptors, parseErr := parseRowDescription(payload)
+			if parseErr != nil {
+				return nil, nil, nil, nil, parseErr
 			}
-			columns = make([]string, 0, len(tableHeaderDescriptors))
-			types = make([]string, 0, len(tableHeaderDescriptors))
 
-			for _, descriptor := range tableHeaderDescriptors {
-				oid := binary.BigEndian.Uint32(
-					descriptor.dataTypeOid,
-				)
+			columns = make([]string, 0, len(descriptors))
+			types = make([]string, 0, len(descriptors))
+
+			for _, descriptor := range descriptors {
+				oid := binary.BigEndian.Uint32(descriptor.dataTypeOid)
 
 				typ, ok := c.oid2typ[int(oid)]
 				if !ok {
@@ -1094,23 +1083,19 @@ func (c *Connection) readExecResults() (nullRows [][]bool, dataRows [][]string, 
 				}
 
 				columns = append(columns, descriptor.name)
-
 				types = append(types, typ)
 			}
 
 		case 'D':
-			// DataRow.
-
-			nullRow, dataRow, err := parseDataRow(payload)
-			if err != nil {
-				return nil, nil, nil, nil, err
+			nullRow, dataRow, parseErr := parseDataRow(payload)
+			if parseErr != nil {
+				return nil, nil, nil, nil, parseErr
 			}
 
 			if len(dataRow) != len(columns) {
 				return nil, nil, nil, nil, fmt.Errorf(
 					"DataRow contains %d columns, RowDescription contains %d",
-					len(dataRow),
-					len(columns),
+					len(dataRow), len(columns),
 				)
 			}
 
@@ -1119,31 +1104,23 @@ func (c *Connection) readExecResults() (nullRows [][]bool, dataRows [][]string, 
 
 		case 'C':
 			// CommandComplete.
-			//
-			// For INSERT/UPDATE/DELETE there may be no
-			// RowDescription/DataRow messages.
 
 		case 'E':
-			return nullRows, dataRows, columns, types,
-				errors.New(parseError(payload))
+			queryErr = errors.New(parseError(payload))
 
 		case 'N':
-			// NoticeResponse.
 			fmt.Printf("Notice: %s\n", parseError(payload))
 
 		case 'n':
-			// No data, ignore for now
+			// NoData.
 
 		case 'Z':
-			// ReadyForQuery.
-			return nullRows, dataRows, columns, types, nil
+			return nullRows, dataRows, columns, types, queryErr
 
 		default:
-			return nullRows, dataRows, columns, types,
-				fmt.Errorf(
-					"unexpected PostgreSQL message %q",
-					msgType,
-				)
+			return nil, nil, nil, nil, fmt.Errorf(
+				"unexpected PostgreSQL message %q", msgType,
+			)
 		}
 	}
 }
