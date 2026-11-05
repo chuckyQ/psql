@@ -44,9 +44,9 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	if p.closed {
-		p.mu.Unlock()
 		return "", nil, false, nil, ErrPoolClosed
 	}
 
@@ -55,7 +55,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		delete(p.openConns, id)
 		p.busyConns[id] = conn
 		p.signalLocked()
-		p.mu.Unlock()
 		return id, conn, true, nil, nil
 	}
 
@@ -63,7 +62,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 	// Reserve capacity atomically before connecting.
 	if p.totalConns < int(p.config.MaxConns) {
 		p.totalConns++
-		p.mu.Unlock()
 		// Do not lock around this because connecting
 		// can be slow and bottleneck the system.
 		conn, err := Connect(
@@ -79,7 +77,6 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 			p.mu.Lock()
 			p.totalConns--
 			p.signalLocked()
-			p.mu.Unlock()
 
 			return "", nil, false, nil, err
 		}
@@ -93,21 +90,18 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 		if p.closed {
 			p.totalConns--
 			p.signalLocked()
-			p.mu.Unlock()
 			conn.Close()
 			return "", nil, false, nil, ErrPoolClosed
 		}
 
 		p.busyConns[id] = conn
 		p.signalLocked()
-		p.mu.Unlock()
 		return id, conn, true, nil, nil
 	}
 
 	// Capture the current notification channel while holding the lock.
 	// A subsequent state change closes this channel and wakes the waiter.
 	wait := p.notify
-	p.mu.Unlock()
 
 	return "", nil, false, wait, nil
 }
@@ -175,10 +169,10 @@ func (p *Pool) release(id string, conn *Connection) {
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	registered, exists := p.busyConns[id]
 	if !exists || registered != conn {
-		p.mu.Unlock()
 		return
 	}
 
@@ -195,7 +189,6 @@ func (p *Pool) release(id string, conn *Connection) {
 	}
 
 	p.signalLocked()
-	p.mu.Unlock()
 
 	if closeConn != nil {
 		closeConn.Close()
@@ -207,8 +200,8 @@ func (p *Pool) release(id string, conn *Connection) {
 // Connections being established are closed when Connect returns.
 func (p *Pool) Close() error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
 		return nil
 	}
 
@@ -222,7 +215,6 @@ func (p *Pool) Close() error {
 	}
 
 	p.signalLocked()
-	p.mu.Unlock()
 
 	for _, conn := range idle {
 		conn.Close()
