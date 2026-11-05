@@ -210,15 +210,15 @@ func NewClient(ctx context.Context, config Config) (*Client, error) {
 	}
 
 	if config.User != "" {
-		defaultConfig.User = "postgres"
+		defaultConfig.User = config.User
 	}
 
 	if config.Password != "" {
-		defaultConfig.Password = "postgres"
+		defaultConfig.Password = config.Password
 	}
 
 	if config.Database != "" {
-		defaultConfig.Database = "postgres"
+		defaultConfig.Database = config.Database
 	}
 
 	if config.SSLMode != "" {
@@ -258,8 +258,20 @@ func NewClient(ctx context.Context, config Config) (*Client, error) {
 		defaultConfig.MinConns = config.MinConns
 	}
 
-	if config.MaxConns < config.MinConns {
+	if defaultConfig.MaxConns <= 0 {
+		return nil, errors.New("max connections must be positive")
+	}
+
+	if defaultConfig.MaxConns < defaultConfig.MinConns {
 		return nil, errors.New("max connections cannot be < min connections")
+	}
+
+	if defaultConfig.MinIdleConns > defaultConfig.MaxIdleConns {
+		return nil, errors.New("min idle connections cannot be > max idle connections")
+	}
+
+	if defaultConfig.MaxIdleConns > defaultConfig.MaxConns {
+		return nil, errors.New("max idle connections cannot be > max connections")
 	}
 
 	if config.MaxIdleConns > 0 {
@@ -279,7 +291,7 @@ func NewClient(ctx context.Context, config Config) (*Client, error) {
 	}
 
 	c := &Client{
-		pool:   newPool(&config),
+		pool:   newPool(&defaultConfig),
 		config: &defaultConfig,
 	}
 
