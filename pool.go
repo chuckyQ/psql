@@ -112,16 +112,14 @@ func (p *Pool) acquire(ctx context.Context) (string, *Connection, bool, <-chan s
 	return "", nil, false, wait, nil
 }
 
-func (p *Pool) getConn(
-	ctx context.Context,
-) (string, *Connection, error) {
+func (p *Pool) getConn(ctx context.Context) (string, *Connection, error) {
 	if ctx == nil {
 		return "", nil, errors.New("psql: nil context")
 	}
 
 	if p.config == nil ||
 		p.config.MaxConns <= 0 ||
-		p.config.MaxIdleConns < 0 {
+		p.config.MaxIdleConns == 0 {
 		return "", nil, ErrInvalidPoolConfig
 	}
 
