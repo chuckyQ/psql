@@ -211,6 +211,11 @@ func findFieldByTag(object reflect.Value, tagName string, tagValue string) (refl
 
 		tag := sf.Tag.Get(tagName)
 
+		if tag == "-" {
+			// Ignored
+			continue
+		}
+
 		if tag == tagValue {
 			field := object.Field(i)
 
